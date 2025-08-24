@@ -17,6 +17,7 @@ export default function App() {
     const [currentData, setCurrentData] = useState({});
     const [isLoading, setIsLoading] = useState(true);
     const [isAuthReady, setIsAuthReady] = useState(false);
+    const [error, setError] = useState(null);
 
     // Firestore data states, updated via onSnapshot listeners
     const [games, setGames] = useState([]);
@@ -40,10 +41,15 @@ export default function App() {
 
             const unsubscribe = onAuthStateChanged(authInstance, async (user) => {
                 if (!user) {
-                    if (initialAuthToken) {
-                        await signInWithCustomToken(authInstance, initialAuthToken);
-                    } else {
-                        await signInAnonymously(authInstance);
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(authInstance, initialAuthToken);
+                        } else {
+                            await signInAnonymously(authInstance);
+                        }
+                    } catch (err) {
+                        console.error("Authentication failed:", err);
+                        setError("Gagal melakukan autentikasi. Silakan coba lagi.");
                     }
                 }
                 setIsAuthReady(true);
@@ -53,68 +59,76 @@ export default function App() {
             return () => unsubscribe();
         } catch (error) {
             console.error("Firebase initialization failed:", error);
+            setError("Gagal menginisialisasi Firebase. Periksa koneksi atau konfigurasi.");
         }
     }, []);
 
-    // Firestore listeners for real-time data
+    // Firestore listeners for real-time data and initial product fetch
     useEffect(() => {
-        if (!isAuthReady || !db || !userId) return;
+        if (!isAuthReady || !db) return;
 
-        // Games listener
-        const gamesRef = collection(db, 'artifacts', appId, 'public', 'data', 'games');
-        const unsubscribeGames = onSnapshot(gamesRef, (snapshot) => {
-            const gamesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setGames(gamesData);
-        });
+        let unsubscribes = [];
 
-        // Banners listener
-        const bannersRef = collection(db, 'artifacts', appId, 'public', 'data', 'banners');
-        const unsubscribeBanners = onSnapshot(bannersRef, (snapshot) => {
-            const bannersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setBanners(bannersData);
-        });
-
-        // Orders listener
-        const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
-        const unsubscribeOrders = onSnapshot(ordersRef, (snapshot) => {
-            const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setOrders(ordersData);
-        });
-
-        // Fetch user data from Firestore if authenticated
-        if (loggedInUser && loggedInUser.email) {
-            const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', userId);
-            const unsubscribeUser = onSnapshot(userRef, (userDoc) => {
-                if (userDoc.exists()) {
-                    setLoggedInUser({ id: userDoc.id, ...userDoc.data() });
+        try {
+            // Games listener
+            const gamesRef = collection(db, 'artifacts', appId, 'public', 'data', 'games');
+            unsubscribes.push(onSnapshot(gamesRef, async (snapshot) => {
+                const gamesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setGames(gamesData);
+                // After getting games, fetch all products for each game
+                const productsData = {};
+                for (const game of gamesData) {
+                    const productsRef = collection(db, 'artifacts', appId, 'public', 'data', 'games', game.id, 'products');
+                    const productSnap = await getDocs(productsRef);
+                    productsData[game.id] = productSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                 }
-            });
-            return () => unsubscribeUser();
+                setProducts(productsData);
+                setIsLoading(false);
+            }, (error) => {
+                console.error("Error fetching games:", error);
+                setError("Gagal memuat daftar game.");
+                setIsLoading(false);
+            }));
+
+            // Banners listener
+            const bannersRef = collection(db, 'artifacts', appId, 'public', 'data', 'banners');
+            unsubscribes.push(onSnapshot(bannersRef, (snapshot) => {
+                const bannersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setBanners(bannersData);
+            }, (error) => {
+                console.error("Error fetching banners:", error);
+                setError("Gagal memuat banner.");
+            }));
+
+            // Orders listener
+            const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+            unsubscribes.push(onSnapshot(ordersRef, (snapshot) => {
+                const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setOrders(ordersData);
+            }, (error) => {
+                console.error("Error fetching orders:", error);
+                setError("Gagal memuat pesanan.");
+            }));
+
+            // Optional: User data listener for logged-in user
+            if (loggedInUser && loggedInUser.email) {
+                const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', userId);
+                unsubscribes.push(onSnapshot(userRef, (userDoc) => {
+                    if (userDoc.exists()) {
+                        setLoggedInUser({ id: userDoc.id, ...userDoc.data() });
+                    }
+                }));
+            }
+        } catch (err) {
+            console.error("Error setting up listeners:", err);
+            setError("Terjadi kesalahan saat memuat data.");
+            setIsLoading(false);
         }
 
-        // Fetch products for all games
-        const unsubscribeProductsList = [];
-        games.forEach(game => {
-            const productsRef = collection(db, 'artifacts', appId, 'public', 'data', 'games', game.id, 'products');
-            const unsubscribeProduct = onSnapshot(productsRef, (snapshot) => {
-                const productsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                setProducts(prevProducts => ({
-                    ...prevProducts,
-                    [game.id]: productsData
-                }));
-            });
-            unsubscribeProductsList.push(unsubscribeProduct);
-        });
-
-        setIsLoading(false);
-
         return () => {
-            unsubscribeGames();
-            unsubscribeBanners();
-            unsubscribeOrders();
-            unsubscribeProductsList.forEach(unsub => unsub());
+            unsubscribes.forEach(unsub => unsub());
         };
-    }, [isAuthReady, db, userId, games, loggedInUser]);
+    }, [isAuthReady, db, userId, loggedInUser]);
 
     const navigateTo = (page, data = {}) => {
         setCurrentPage(page);
@@ -982,7 +996,24 @@ export default function App() {
     // Render the correct page based on state
     const renderPage = () => {
         if (isLoading) {
-            return <div className="flex justify-center items-center h-screen text-white">Loading...</div>;
+            return (
+                <div className="fixed inset-0 flex flex-col items-center justify-center bg-slate-800 text-white z-50">
+                    <svg className="animate-spin h-10 w-10 text-sky-400 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <div className="text-xl font-semibold">Memuat data...</div>
+                </div>
+            );
+        }
+
+        if (error) {
+            return (
+                <div className="flex flex-col items-center justify-center h-screen bg-slate-800 text-red-400">
+                    <h1 className="text-2xl font-bold mb-4">Terjadi Kesalahan</h1>
+                    <p className="text-center">{error}</p>
+                </div>
+            );
         }
 
         switch (currentPage) {

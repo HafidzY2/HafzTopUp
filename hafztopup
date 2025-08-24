@@ -1,0 +1,1030 @@
+import { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, addDoc, getDocs } from 'firebase/firestore';
+
+// IMPORTANT: Do not remove these variables. They are provided by the Canvas environment.
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// The main application component
+export default function App() {
+    // State variables for application logic
+    const [currentPage, setCurrentPage] = useState('home');
+    const [loggedInUser, setLoggedInUser] = useState(null);
+    const [loginFailed, setLoginFailed] = useState(false);
+    const [currentData, setCurrentData] = useState({});
+    const [isLoading, setIsLoading] = useState(true);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+
+    // Firestore data states, updated via onSnapshot listeners
+    const [games, setGames] = useState([]);
+    const [products, setProducts] = useState({});
+    const [banners, setBanners] = useState([]);
+    const [orders, setOrders] = useState([]);
+
+    // Firebase instances
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+
+    // One-time Firebase and Auth initialization
+    useEffect(() => {
+        try {
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const authInstance = getAuth(app);
+            setDb(firestore);
+            setAuth(authInstance);
+
+            const unsubscribe = onAuthStateChanged(authInstance, async (user) => {
+                if (!user) {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(authInstance, initialAuthToken);
+                    } else {
+                        await signInAnonymously(authInstance);
+                    }
+                }
+                setIsAuthReady(true);
+                setUserId(user?.uid);
+            });
+
+            return () => unsubscribe();
+        } catch (error) {
+            console.error("Firebase initialization failed:", error);
+        }
+    }, []);
+
+    // Firestore listeners for real-time data
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId) return;
+
+        // Games listener
+        const gamesRef = collection(db, 'artifacts', appId, 'public', 'data', 'games');
+        const unsubscribeGames = onSnapshot(gamesRef, (snapshot) => {
+            const gamesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setGames(gamesData);
+        });
+
+        // Banners listener
+        const bannersRef = collection(db, 'artifacts', appId, 'public', 'data', 'banners');
+        const unsubscribeBanners = onSnapshot(bannersRef, (snapshot) => {
+            const bannersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setBanners(bannersData);
+        });
+
+        // Orders listener
+        const ordersRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+        const unsubscribeOrders = onSnapshot(ordersRef, (snapshot) => {
+            const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setOrders(ordersData);
+        });
+
+        // Fetch user data from Firestore if authenticated
+        if (loggedInUser && loggedInUser.email) {
+            const userRef = doc(db, 'artifacts', appId, 'public', 'data', 'users', userId);
+            const unsubscribeUser = onSnapshot(userRef, (userDoc) => {
+                if (userDoc.exists()) {
+                    setLoggedInUser({ id: userDoc.id, ...userDoc.data() });
+                }
+            });
+            return () => unsubscribeUser();
+        }
+
+        // Fetch products for all games
+        const unsubscribeProductsList = [];
+        games.forEach(game => {
+            const productsRef = collection(db, 'artifacts', appId, 'public', 'data', 'games', game.id, 'products');
+            const unsubscribeProduct = onSnapshot(productsRef, (snapshot) => {
+                const productsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                setProducts(prevProducts => ({
+                    ...prevProducts,
+                    [game.id]: productsData
+                }));
+            });
+            unsubscribeProductsList.push(unsubscribeProduct);
+        });
+
+        setIsLoading(false);
+
+        return () => {
+            unsubscribeGames();
+            unsubscribeBanners();
+            unsubscribeOrders();
+            unsubscribeProductsList.forEach(unsub => unsub());
+        };
+    }, [isAuthReady, db, userId, games, loggedInUser]);
+
+    const navigateTo = (page, data = {}) => {
+        setCurrentPage(page);
+        setCurrentData(data);
+    };
+
+    const logout = async () => {
+        if (auth) {
+            await auth.signOut();
+        }
+        setLoggedInUser(null);
+        navigateTo('home');
+    };
+
+    // UI Helper Components
+    const renderHeader = () => {
+        const isLoggedIn = loggedInUser !== null && !auth?.currentUser?.isAnonymous;
+        const isAdmin = loggedInUser?.is_admin;
+        return (
+            <header className="bg-slate-900 shadow-md sticky top-0 z-50">
+                <div className="container mx-auto px-4 py-4 flex justify-between items-center">
+                    <div className="flex items-center">
+                        <span className="text-2xl font-bold text-sky-400 cursor-pointer" onClick={() => navigateTo('home')}>HaffzTopUp</span>
+                        <nav className="hidden md:flex ml-10 space-x-6 text-gray-400 font-semibold">
+                            <a href="#" className="hover:text-sky-400 transition-colors" onClick={() => navigateTo('home')}>Home</a>
+                            <a href="#" className="hover:text-sky-400 transition-colors">Discover</a>
+                            <a href="#" className="hover:text-sky-400 transition-colors" onClick={() => navigateTo('home')}>Semua Game</a>
+                            <a href="#" className="hover:text-sky-400 transition-colors">Promo</a>
+                            {isAdmin && (
+                                <a href="#" className="text-red-400 hover:text-sky-400 transition-colors" onClick={() => navigateTo('admin-dashboard')}>Admin Panel</a>
+                            )}
+                        </nav>
+                    </div>
+                    <div className="flex items-center space-x-4">
+                        {isLoggedIn ? (
+                            <>
+                                <div className="text-sm">Halo, <span className="text-sky-400 font-bold">{loggedInUser.name.split(' ')[0]}</span></div>
+                                <button className="bg-sky-400 text-black font-semibold px-4 py-2 rounded-lg hover:bg-sky-200 transition-colors" onClick={() => navigateTo('user-history')}>Riwayat Top Up</button>
+                                <button className="bg-gray-700 text-white font-semibold px-4 py-2 rounded-lg hover:bg-gray-600 transition-colors" onClick={logout}>Logout</button>
+                            </>
+                        ) : (
+                            <>
+                                <button className="bg-sky-400 text-black font-semibold px-4 py-2 rounded-lg hover:bg-sky-200 transition-colors" onClick={() => navigateTo('login')}>Login</button>
+                                <button className="bg-gray-700 text-white font-semibold px-4 py-2 rounded-lg hover:bg-gray-600 transition-colors" onClick={() => navigateTo('register')}>Register</button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            </header>
+        );
+    };
+
+    // Page Components
+    const renderHomePage = () => {
+        const featuredGames = games.filter(g => g.featured);
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-8">
+                    <div className="relative w-full rounded-xl overflow-hidden shadow-lg mb-8">
+                        <img src={banners[0]?.image || 'https://placehold.co/1200x300/108ee9/ffffff?text=Banner+Promo+Spesial'} alt="Promo Banner" className="w-full h-auto object-cover" />
+                    </div>
+                    <h2 className="text-2xl font-bold text-center mb-6 text-white">Top Up Game Populer</h2>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
+                        {featuredGames.map(game => (
+                            <div key={game.id} className="bg-slate-900 rounded-xl overflow-hidden shadow-lg border border-slate-700 hover:border-sky-400 transition-all cursor-pointer" onClick={() => navigateTo('topup', { gameId: game.id })}>
+                                <div className="w-full h-32 relative overflow-hidden">
+                                    <img src={game.banner} alt={`${game.name} Banner`} className="w-full h-full object-cover" />
+                                    <div className="absolute inset-0 bg-black bg-opacity-40"></div>
+                                </div>
+                                <div className="p-4 relative">
+                                    <img src={game.logo} alt={`${game.name} Logo`} className="w-16 h-16 rounded-lg absolute -top-10 left-1/2 transform -translate-x-1/2 border-2 border-white" />
+                                    <h4 className="mt-8 text-lg font-semibold text-center text-white">{game.name}</h4>
+                                    <button className="w-full mt-4 bg-sky-400 text-black font-semibold py-2 rounded-lg hover:bg-sky-200 transition-colors">Top Up</button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <h2 className="text-2xl font-bold text-center mb-6 mt-12 text-white">Semua Game</h2>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
+                        {games.map(game => (
+                            <div key={game.id} className="flex flex-col items-center bg-slate-900 rounded-xl p-4 shadow-lg border border-slate-700 hover:border-sky-400 transition-all cursor-pointer" onClick={() => navigateTo('topup', { gameId: game.id })}>
+                                <img src={game.logo} alt={`${game.name} Logo`} className="w-20 h-20 rounded-lg mb-2" />
+                                <h4 className="text-sm font-semibold text-center text-white">{game.name}</h4>
+                            </div>
+                        ))}
+                    </div>
+                </main>
+            </>
+        );
+    };
+
+    const renderTopupPage = () => {
+        const game = games.find(g => g.id === currentData.gameId);
+        const gameProducts = products[currentData.gameId] || [];
+        const [selectedProduct, setSelectedProduct] = useState(null);
+        const [selectedPayment, setSelectedPayment] = useState(null);
+        const [userIdInput, setUserIdInput] = useState('');
+        const [serverIdInput, setServerIdInput] = useState('');
+
+        if (!game) return <div>Game not found</div>;
+
+        const handlePay = async () => {
+            if (!userIdInput) {
+                alert('Silakan masukkan User ID Anda.');
+                return;
+            }
+            if (!selectedProduct || !selectedPayment) {
+                alert('Silakan pilih nominal dan metode pembayaran.');
+                return;
+            }
+
+            try {
+                const newOrderRef = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+                const newOrder = {
+                    userId: loggedInUser?.uid || 'guest',
+                    gameId: game.id,
+                    gameName: game.name,
+                    userIdGame: userIdInput,
+                    serverIdGame: serverIdInput,
+                    nominalId: selectedProduct.id,
+                    nominalName: selectedProduct.amount_text,
+                    paymentId: selectedPayment.id,
+                    paymentName: selectedPayment.name,
+                    price: selectedProduct.price,
+                    status: 'Pending',
+                    timestamp: new Date().toISOString()
+                };
+
+                await addDoc(newOrderRef, newOrder);
+                alert('Pesanan berhasil dibuat!');
+                navigateTo('home');
+            } catch (error) {
+                console.error("Error creating order:", error);
+                alert('Gagal membuat pesanan. Silakan coba lagi.');
+            }
+        };
+
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-8">
+                    <div className="relative w-full rounded-xl overflow-hidden shadow-lg mb-8 h-48 md:h-64">
+                        <img src={game.banner} alt={`${game.name} Banner`} className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-black bg-opacity-60 flex flex-col items-center justify-center p-4">
+                            <img src={game.logo} alt={`${game.name} Logo`} className="w-24 h-24 rounded-lg border-4 border-white mb-2" />
+                            <h1 className="text-2xl md:text-4xl font-bold text-white">{game.name}</h1>
+                        </div>
+                    </div>
+                    {/* Display the game description, which can now be generated by the LLM */}
+                    {game.description && (
+                        <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700 mb-6 text-gray-300">
+                            <h3 className="text-xl font-bold mb-2 text-white">Deskripsi Game</h3>
+                            <p>{game.description}</p>
+                        </div>
+                    )}
+                    <div className="grid md:grid-cols-3 gap-8">
+                        <div className="md:col-span-2">
+                            <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700 mb-6">
+                                <h3 className="text-xl font-bold mb-4 text-white"><span className="text-sky-400">1.</span> Masukkan ID & Server</h3>
+                                <div className="flex flex-col md:flex-row gap-4">
+                                    <input type="text" value={userIdInput} onChange={(e) => setUserIdInput(e.target.value)} placeholder="Masukkan User ID" className="input-style flex-1 p-3 rounded-lg bg-slate-800 border border-slate-600 text-white" />
+                                    <input type="text" value={serverIdInput} onChange={(e) => setServerIdInput(e.target.value)} placeholder="Masukkan Server ID (opsional)" className="input-style flex-1 p-3 rounded-lg bg-slate-800 border border-slate-600 text-white" />
+                                </div>
+                                <p className="text-sm text-gray-500 mt-2">Contoh: 12345678 (1234)</p>
+                            </div>
+                            <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700 mb-6">
+                                <h3 className="text-xl font-bold mb-4 text-white"><span className="text-sky-400">2.</span> Pilih Nominal Top Up</h3>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                                    {gameProducts.map(p => (
+                                        <div key={p.id} className={`nominal-item bg-slate-900 rounded-xl border-2 border-slate-700 relative transition-all ${selectedProduct?.id === p.id ? 'selected !border-sky-400 bg-slate-800 scale-[1.02] shadow-sky-500/50' : ''}`} onClick={() => setSelectedProduct(p)}>
+                                            {p.featured && (
+                                                <div className="absolute top-0 right-0 -mt-2 -mr-2 bg-sky-400 text-black text-xs font-bold px-2 py-1 rounded-full shadow-lg">Populer</div>
+                                            )}
+                                            <div className="p-4 flex flex-col items-center text-center">
+                                                <img src={p.icon || 'https://placehold.co/40x40/38bdf8/000000?text=💎'} alt="Item Icon" className="w-12 h-12 mb-2" />
+                                                <span className="text-sm font-semibold text-white">{p.amount_text}</span>
+                                                <span className="text-base font-bold text-sky-400 mt-1">Rp {p.price.toLocaleString('id-ID')}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700 mb-6">
+                                <h3 className="text-xl font-bold mb-4 text-white"><span className="text-sky-400">3.</span> Pilih Metode Pembayaran</h3>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    {['OVO', 'DANA', 'GoPay', 'ShopeePay', 'Bank Transfer'].map(name => {
+                                        const id = name.toLowerCase().replace(/\s/g, '');
+                                        return (
+                                            <div key={id} className={`payment-item bg-slate-900 p-4 rounded-xl flex items-center border-2 border-slate-700 transition-all ${selectedPayment?.id === id ? 'selected !border-sky-400 bg-slate-800' : ''}`} onClick={() => setSelectedPayment({ id, name })}>
+                                                <img src={`https://placehold.co/40x40/${id === 'ovo' ? '5d429a' : id === 'dana' ? '108ee9' : id === 'gopay' ? '00a653' : id === 'shopeepay' ? 'ee4d2d' : 'ffffff'}/${id === 'banktransfer' ? '000000' : 'ffffff'}?text=${name.substring(0, 2).toUpperCase()}`} alt={`${name} Logo`} className="w-10 h-10 rounded-lg mr-4" />
+                                                <span className="text-lg font-semibold text-white">{name}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                            <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                                <h3 className="text-xl font-bold mb-4 text-white">Ringkasan Pesanan</h3>
+                                <div className="flex justify-between items-center text-lg mb-2">
+                                    <span>Nominal:</span>
+                                    <span className="text-sky-400">{selectedProduct?.amount_text || '-'}</span>
+                                </div>
+                                <div className="flex justify-between items-center text-lg mb-4">
+                                    <span>Metode Pembayaran:</span>
+                                    <span className="text-sky-400">{selectedPayment?.name || '-'}</span>
+                                </div>
+                                <div className="border-t border-slate-700 pt-4 flex justify-between items-center font-bold text-xl">
+                                    <span>Total Harga:</span>
+                                    <span className="text-sky-400">Rp {selectedProduct?.price.toLocaleString('id-ID') || '0'}</span>
+                                </div>
+                                <button onClick={handlePay} className="w-full mt-6 bg-sky-400 text-black font-bold py-3 rounded-lg hover:bg-sky-200 transition-colors disabled:opacity-50" disabled={!selectedProduct || !selectedPayment || !userIdInput}>Bayar Sekarang</button>
+                            </div>
+                        </div>
+                    </div>
+                </main>
+            </>
+        );
+    };
+
+    const renderLoginPage = () => {
+        const [email, setEmail] = useState('');
+        const [password, setPassword] = useState('');
+
+        const handleLogin = async (e) => {
+            e.preventDefault();
+            setLoginFailed(false);
+            try {
+                const userQuery = query(collection(db, 'artifacts', appId, 'public', 'data', 'users'), where('email', '==', email), where('password', '==', password));
+                const userSnapshot = await getDocs(userQuery);
+                if (!userSnapshot.empty) {
+                    const userData = userSnapshot.docs[0].data();
+                    const customTokenRef = doc(db, 'artifacts', appId, 'public', 'data', 'authTokens', userData.email);
+                    await setDoc(customTokenRef, { token: 'mock-token-' + new Date().getTime() });
+                    const userDoc = userSnapshot.docs[0];
+                    setLoggedInUser({ id: userDoc.id, ...userDoc.data() });
+                    navigateTo('home');
+                } else {
+                    setLoginFailed(true);
+                }
+            } catch (error) {
+                console.error("Login failed:", error);
+                setLoginFailed(true);
+            }
+        };
+
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-16 flex justify-center items-center">
+                    <div className="bg-slate-900 p-8 rounded-xl shadow-lg w-full max-w-md border border-slate-700">
+                        <h1 className="text-2xl font-bold mb-6 text-center text-sky-400">Login ke HaffzTopUp</h1>
+                        {loginFailed && <p className="text-red-500 text-center mb-4">Email atau password salah.</p>}
+                        <form onSubmit={handleLogin}>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-400">Email</label>
+                                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                            </div>
+                            <div className="mb-6">
+                                <label className="block text-sm font-medium text-gray-400">Password</label>
+                                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                            </div>
+                            <button type="submit" className="w-full bg-sky-400 text-black font-bold py-3 rounded-lg hover:bg-sky-200 transition-colors">Login</button>
+                            <p className="text-center mt-4 text-gray-400">Belum punya akun? <a href="#" className="text-sky-400 hover:underline" onClick={() => navigateTo('register')}>Register sekarang</a></p>
+                        </form>
+                    </div>
+                </main>
+            </>
+        );
+    };
+
+    const renderRegisterPage = () => {
+        const [name, setName] = useState('');
+        const [whatsapp, setWhatsapp] = useState('');
+        const [email, setEmail] = useState('');
+        const [password, setPassword] = useState('');
+        const [confirmPassword, setConfirmPassword] = useState('');
+
+        const handleRegister = async (e) => {
+            e.preventDefault();
+            if (password !== confirmPassword) {
+                alert('Konfirmasi password tidak cocok.');
+                return;
+            }
+            try {
+                const userRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+                await addDoc(userRef, {
+                    name,
+                    whatsapp,
+                    email,
+                    password,
+                    is_admin: false,
+                    orders: []
+                });
+                alert('Registrasi berhasil! Silakan login.');
+                navigateTo('login');
+            } catch (error) {
+                console.error("Error adding document: ", error);
+                alert('Gagal mendaftar. Silakan coba lagi.');
+            }
+        };
+
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-16 flex justify-center items-center">
+                    <div className="bg-slate-900 p-8 rounded-xl shadow-lg w-full max-w-md border border-slate-700">
+                        <h1 className="text-2xl font-bold mb-6 text-center text-sky-400">Daftar Akun Baru</h1>
+                        <form onSubmit={handleRegister}>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-400">Nama</label>
+                                <input type="text" value={name} onChange={(e) => setName(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                            </div>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-400">Nomor WhatsApp</label>
+                                <input type="tel" value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                            </div>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-400">Email</label>
+                                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                            </div>
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-400">Password</label>
+                                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                            </div>
+                            <div className="mb-6">
+                                <label className="block text-sm font-medium text-gray-400">Konfirmasi Password</label>
+                                <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                            </div>
+                            <button type="submit" className="w-full bg-sky-400 text-black font-bold py-3 rounded-lg hover:bg-sky-200 transition-colors">Daftar</button>
+                            <p className="text-center mt-4 text-gray-400">Sudah punya akun? <a href="#" className="text-sky-400 hover:underline" onClick={() => navigateTo('login')}>Login di sini</a></p>
+                        </form>
+                    </div>
+                </main>
+            </>
+        );
+    };
+
+    const renderAdminDashboard = () => {
+        if (!loggedInUser || !loggedInUser.is_admin) {
+            return <div className="p-8 text-center text-red-500">Akses ditolak. Anda tidak memiliki izin.</div>;
+        }
+
+        const totalSales = orders.reduce((sum, order) => sum + order.price, 0);
+        const totalOrders = orders.length;
+        const activeUsers = games.length;
+
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-8">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-bold text-sky-400">Admin Dashboard</h1>
+                        <nav>
+                            <ul className="flex space-x-4 text-white">
+                                <li><a href="#" className="hover:text-sky-400" onClick={() => navigateTo('admin-dashboard')}>Dashboard</a></li>
+                                <li><a href="#" className="hover:text-sky-400" onClick={() => navigateTo('admin-games')}>Game</a></li>
+                                <li><a href="#" className="hover:text-sky-400" onClick={() => navigateTo('admin-products')}>Nominal</a></li>
+                                <li><a href="#" className="hover:text-sky-400" onClick={() => navigateTo('admin-banners')}>Banner</a></li>
+                                <li><a href="#" className="hover:text-sky-400" onClick={() => navigateTo('admin-orders')}>Pesanan</a></li>
+                            </ul>
+                        </nav>
+                    </div>
+                    <div className="grid md:grid-cols-3 gap-6 mb-8">
+                        <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                            <h2 className="text-xl font-bold text-white mb-2">Total Penjualan</h2>
+                            <p className="text-3xl font-bold text-sky-400">Rp {totalSales.toLocaleString('id-ID')}</p>
+                        </div>
+                        <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                            <h2 className="text-xl font-bold text-white mb-2">Total Pesanan</h2>
+                            <p className="text-3xl font-bold text-sky-400">{totalOrders}</p>
+                        </div>
+                        <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                            <h2 className="text-xl font-bold text-white mb-2">Pengguna Aktif</h2>
+                            <p className="text-3xl font-bold text-sky-400">{activeUsers}</p>
+                        </div>
+                    </div>
+                </main>
+            </>
+        );
+    };
+
+    const renderAdminGames = () => {
+        if (!loggedInUser?.is_admin) { return <div className="p-8 text-center text-red-500">Akses ditolak. Anda tidak memiliki izin.</div>; }
+        const [isModalOpen, setIsModalOpen] = useState(false);
+        const [editGameId, setEditGameId] = useState(null);
+        const [gameName, setGameName] = useState('');
+        const [gameLogo, setGameLogo] = useState('');
+        const [gameBanner, setGameBanner] = useState('');
+        const [gameDescription, setGameDescription] = useState('');
+        const [gameFeatured, setGameFeatured] = useState(false);
+        const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
+
+        useEffect(() => {
+            if (editGameId) {
+                const gameToEdit = games.find(g => g.id === editGameId);
+                if (gameToEdit) {
+                    setGameName(gameToEdit.name);
+                    setGameLogo(gameToEdit.logo);
+                    setGameBanner(gameToEdit.banner);
+                    setGameDescription(gameToEdit.description || ''); // Set the description if it exists
+                    setGameFeatured(gameToEdit.featured);
+                }
+            } else {
+                setGameName('');
+                setGameLogo('');
+                setGameBanner('');
+                setGameDescription(''); // Clear description for new game
+                setGameFeatured(false);
+            }
+        }, [editGameId, games]);
+
+        const handleModalSubmit = async (e) => {
+            e.preventDefault();
+            try {
+                if (editGameId) {
+                    const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', editGameId);
+                    await updateDoc(gameRef, {
+                        name: gameName,
+                        logo: gameLogo,
+                        banner: gameBanner,
+                        description: gameDescription, // Save the new description
+                        featured: gameFeatured
+                    });
+                } else {
+                    const newGameRef = collection(db, 'artifacts', appId, 'public', 'data', 'games');
+                    await addDoc(newGameRef, {
+                        name: gameName,
+                        logo: gameLogo,
+                        banner: gameBanner,
+                        description: gameDescription, // Save the new description
+                        featured: gameFeatured
+                    });
+                }
+                setIsModalOpen(false);
+            } catch (error) {
+                console.error("Error saving game:", error);
+            }
+        };
+
+        const handleDelete = async (id) => {
+            if (window.confirm('Yakin ingin menghapus game ini?')) {
+                try {
+                    const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', id);
+                    await deleteDoc(gameRef);
+                } catch (error) {
+                    console.error("Error deleting game:", error);
+                }
+            }
+        };
+
+        // Function to call the Gemini API to generate a game description
+        const generateDescription = async () => {
+            if (!gameName) {
+                alert('Mohon masukkan nama game terlebih dahulu.');
+                return;
+            }
+
+            setIsGeneratingDescription(true);
+            try {
+                const chatHistory = [];
+                const prompt = `Buat deskripsi pemasaran yang singkat dan menarik untuk game seluler bernama "${gameName}". Deskripsi harus sekitar 1-2 kalimat dan menyoroti fitur-fitur utamanya (misalnya, aksi, strategi, RPG) dalam bahasa Indonesia. Jangan sertakan judul.`;
+                chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+                const payload = { contents: chatHistory };
+                const apiKey = ""
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error.message || 'API request failed');
+                }
+
+                const result = await response.json();
+                const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (text) {
+                    setGameDescription(text.trim());
+                } else {
+                    setGameDescription('Gagal membuat deskripsi. Silakan coba lagi.');
+                }
+            } catch (error) {
+                console.error("Error generating description:", error);
+                setGameDescription('Error: ' + error.message);
+            } finally {
+                setIsGeneratingDescription(false);
+            }
+        };
+
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-8">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-bold text-sky-400">Manajemen Game</h1>
+                        <button className="bg-sky-400 text-black font-bold py-2 px-4 rounded-lg hover:bg-sky-200 transition-colors" onClick={() => { setEditGameId(null); setIsModalOpen(true); }}>Tambah Game</button>
+                    </div>
+                    <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-left">
+                                <thead className="border-b border-slate-700">
+                                    <tr>
+                                        <th className="py-2 px-4 text-gray-400">Logo</th>
+                                        <th className="py-2 px-4 text-gray-400">Nama</th>
+                                        <th className="py-2 px-4 text-gray-400">Deskripsi</th>
+                                        <th className="py-2 px-4 text-gray-400">Populer?</th>
+                                        <th className="py-2 px-4 text-gray-400">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {games.map(game => (
+                                        <tr key={game.id} className="border-b border-slate-700 last:border-b-0">
+                                            <td className="py-2 px-4"><img src={game.logo} className="w-12 h-12 rounded-lg" alt="game logo" /></td>
+                                            <td className="py-2 px-4">{game.name}</td>
+                                            <td className="py-2 px-4 max-w-sm overflow-hidden text-ellipsis">{game.description}</td>
+                                            <td className="py-2 px-4">{game.featured ? 'Ya' : 'Tidak'}</td>
+                                            <td className="py-2 px-4">
+                                                <button className="text-sky-400 hover:underline mr-2" onClick={() => { setEditGameId(game.id); setIsModalOpen(true); }}>Edit</button>
+                                                <button className="text-red-500 hover:underline" onClick={() => handleDelete(game.id)}>Hapus</button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {isModalOpen && (
+                        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+                            <div className="bg-slate-900 p-8 rounded-xl shadow-lg w-full max-w-lg border border-slate-700">
+                                <h2 className="text-2xl font-bold mb-4 text-sky-400 text-center">{editGameId ? 'Edit Game' : 'Tambah Game'}</h2>
+                                <form onSubmit={handleModalSubmit}>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">Nama Game</label>
+                                        <input type="text" value={gameName} onChange={(e) => setGameName(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">URL Logo</label>
+                                        <input type="text" value={gameLogo} onChange={(e) => setGameLogo(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">URL Banner</label>
+                                        <input type="text" value={gameBanner} onChange={(e) => setGameBanner(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    {/* Added new section for Gemini-powered description generation */}
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">Deskripsi Game</label>
+                                        <div className="flex items-center space-x-2">
+                                            <textarea value={gameDescription} onChange={(e) => setGameDescription(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white resize-none h-24" placeholder="Masukkan deskripsi game atau buat otomatis..." />
+                                        </div>
+                                        <button type="button" onClick={generateDescription} className="mt-2 bg-purple-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-purple-500 transition-colors disabled:opacity-50" disabled={isGeneratingDescription || !gameName}>
+                                            {isGeneratingDescription ? 'Membuat...' : '✨ Buat Deskripsi Otomatis'}
+                                        </button>
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="flex items-center">
+                                            <input type="checkbox" checked={gameFeatured} onChange={(e) => setGameFeatured(e.target.checked)} className="mr-2" />
+                                            <span className="text-sm font-medium text-gray-400">Tampilkan di Beranda</span>
+                                        </label>
+                                    </div>
+                                    <button type="submit" className="w-full bg-sky-400 text-black font-bold py-3 rounded-lg hover:bg-sky-200 transition-colors">{editGameId ? 'Simpan Perubahan' : 'Tambah Game'}</button>
+                                    <button type="button" className="w-full mt-2 bg-gray-700 text-white font-bold py-3 rounded-lg hover:bg-gray-600 transition-colors" onClick={() => setIsModalOpen(false)}>Batal</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </main>
+            </>
+        );
+    };
+
+    const renderAdminProducts = () => {
+        if (!loggedInUser?.is_admin) { return <div className="p-8 text-center text-red-500">Akses ditolak. Anda tidak memiliki izin.</div>; }
+        const [isModalOpen, setIsModalOpen] = useState(false);
+        const [editProductId, setEditProductId] = useState(null);
+        const [editProductGameId, setEditProductGameId] = useState(null);
+        const [gameId, setGameId] = useState(games[0]?.id || '');
+        const [amountText, setAmountText] = useState('');
+        const [price, setPrice] = useState(0);
+        const [icon, setIcon] = useState('');
+        const [featured, setFeatured] = useState(false);
+
+        useEffect(() => {
+            if (editProductId && editProductGameId) {
+                const productToEdit = products[editProductGameId]?.find(p => p.id === editProductId);
+                if (productToEdit) {
+                    setGameId(editProductGameId);
+                    setAmountText(productToEdit.amount_text);
+                    setPrice(productToEdit.price);
+                    setIcon(productToEdit.icon);
+                    setFeatured(productToEdit.featured);
+                }
+            } else {
+                setGameId(games[0]?.id || '');
+                setAmountText('');
+                setPrice(0);
+                setIcon('');
+                setFeatured(false);
+            }
+        }, [editProductId, editProductGameId, products, games]);
+
+        const handleModalSubmit = async (e) => {
+            e.preventDefault();
+            try {
+                if (editProductId) {
+                    const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', editProductGameId, 'products', editProductId);
+                    await updateDoc(productRef, { amount_text: amountText, price, icon, featured });
+                } else {
+                    const productsRef = collection(db, 'artifacts', appId, 'public', 'data', 'games', gameId, 'products');
+                    await addDoc(productsRef, { amount_text: amountText, price, icon, featured });
+                }
+                setIsModalOpen(false);
+            } catch (error) {
+                console.error("Error saving product:", error);
+            }
+        };
+
+        const handleDelete = async (gameId, productId) => {
+            if (window.confirm('Yakin ingin menghapus nominal ini?')) {
+                try {
+                    const productRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', gameId, 'products', productId);
+                    await deleteDoc(productRef);
+                } catch (error) {
+                    console.error("Error deleting product:", error);
+                }
+            }
+        };
+
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-8">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-bold text-sky-400">Manajemen Nominal</h1>
+                        <button className="bg-sky-400 text-black font-bold py-2 px-4 rounded-lg hover:bg-sky-200 transition-colors" onClick={() => { setEditProductId(null); setEditProductGameId(null); setIsModalOpen(true); }}>Tambah Nominal</button>
+                    </div>
+                    <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-left">
+                                <thead className="border-b border-slate-700">
+                                    <tr>
+                                        <th className="py-2 px-4 text-gray-400">Game</th>
+                                        <th className="py-2 px-4 text-gray-400">Item</th>
+                                        <th className="py-2 px-4 text-gray-400">Nominal</th>
+                                        <th className="py-2 px-4 text-gray-400">Harga</th>
+                                        <th className="py-2 px-4 text-gray-400">Populer?</th>
+                                        <th className="py-2 px-4 text-gray-400">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {Object.keys(products).map(gameId => {
+                                        const game = games.find(g => g.id === gameId);
+                                        return products[gameId]?.map(product => (
+                                            <tr key={product.id} className="border-b border-slate-700 last:border-b-0">
+                                                <td className="py-2 px-4">{game?.name}</td>
+                                                <td className="py-2 px-4"><img src={product.icon} className="w-8 h-8 rounded-full" alt="icon" /></td>
+                                                <td className="py-2 px-4">{product.amount_text}</td>
+                                                <td className="py-2 px-4">Rp {product.price?.toLocaleString('id-ID')}</td>
+                                                <td className="py-2 px-4">{product.featured ? 'Ya' : 'Tidak'}</td>
+                                                <td className="py-2 px-4">
+                                                    <button className="text-sky-400 hover:underline mr-2" onClick={() => { setEditProductId(product.id); setEditProductGameId(gameId); setIsModalOpen(true); }}>Edit</button>
+                                                    <button className="text-red-500 hover:underline" onClick={() => handleDelete(gameId, product.id)}>Hapus</button>
+                                                </td>
+                                            </tr>
+                                        ));
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {isModalOpen && (
+                        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+                            <div className="bg-slate-900 p-8 rounded-xl shadow-lg w-full max-w-lg border border-slate-700">
+                                <h2 className="text-2xl font-bold mb-4 text-sky-400 text-center">{editProductId ? 'Edit Nominal' : 'Tambah Nominal'}</h2>
+                                <form onSubmit={handleModalSubmit}>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">Pilih Game</label>
+                                        <select value={gameId} onChange={(e) => setGameId(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" disabled={!!editProductId}>
+                                            {games.map(g => (<option key={g.id} value={g.id}>{g.name}</option>))}
+                                        </select>
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">Nominal/Nama Item</label>
+                                        <input type="text" value={amountText} onChange={(e) => setAmountText(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">Harga (Rp)</label>
+                                        <input type="number" value={price} onChange={(e) => setPrice(parseInt(e.target.value) || 0)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">URL Ikon</label>
+                                        <input type="text" value={icon} onChange={(e) => setIcon(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="flex items-center">
+                                            <input type="checkbox" checked={featured} onChange={(e) => setFeatured(e.target.checked)} className="mr-2" />
+                                            <span className="text-sm font-medium text-gray-400">Nominal Populer?</span>
+                                        </label>
+                                    </div>
+                                    <button type="submit" className="w-full bg-sky-400 text-black font-bold py-3 rounded-lg hover:bg-sky-200 transition-colors">{editProductId ? 'Simpan Perubahan' : 'Tambah Nominal'}</button>
+                                    <button type="button" className="w-full mt-2 bg-gray-700 text-white font-bold py-3 rounded-lg hover:bg-gray-600 transition-colors" onClick={() => setIsModalOpen(false)}>Batal</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </main>
+            </>
+        );
+    };
+
+    const renderAdminBanners = () => {
+        if (!loggedInUser?.is_admin) { return <div className="p-8 text-center text-red-500">Akses ditolak. Anda tidak memiliki izin.</div>; }
+        const [isModalOpen, setIsModalOpen] = useState(false);
+        const [editBannerId, setEditBannerId] = useState(null);
+        const [bannerImage, setBannerImage] = useState('');
+        const [bannerExpires, setBannerExpires] = useState('');
+
+        useEffect(() => {
+            if (editBannerId) {
+                const bannerToEdit = banners.find(b => b.id === editBannerId);
+                if (bannerToEdit) {
+                    setBannerImage(bannerToEdit.image);
+                    setBannerExpires(bannerToEdit.expires);
+                }
+            } else {
+                setBannerImage('');
+                setBannerExpires('');
+            }
+        }, [editBannerId, banners]);
+
+        const handleModalSubmit = async (e) => {
+            e.preventDefault();
+            try {
+                if (editBannerId) {
+                    const bannerRef = doc(db, 'artifacts', appId, 'public', 'data', 'banners', editBannerId);
+                    await updateDoc(bannerRef, { image: bannerImage, expires: bannerExpires });
+                } else {
+                    const bannersRef = collection(db, 'artifacts', appId, 'public', 'data', 'banners');
+                    await addDoc(bannersRef, { image: bannerImage, expires: bannerExpires });
+                }
+                setIsModalOpen(false);
+            } catch (error) {
+                console.error("Error saving banner:", error);
+            }
+        };
+
+        const handleDelete = async (id) => {
+            if (window.confirm('Yakin ingin menghapus banner ini?')) {
+                try {
+                    const bannerRef = doc(db, 'artifacts', appId, 'public', 'data', 'banners', id);
+                    await deleteDoc(bannerRef);
+                } catch (error) {
+                    console.error("Error deleting banner:", error);
+                }
+            }
+        };
+
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-8">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-bold text-sky-400">Manajemen Banner</h1>
+                        <button className="bg-sky-400 text-black font-bold py-2 px-4 rounded-lg hover:bg-sky-200 transition-colors" onClick={() => { setEditBannerId(null); setIsModalOpen(true); }}>Tambah Banner</button>
+                    </div>
+                    <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-left">
+                                <thead className="border-b border-slate-700">
+                                    <tr>
+                                        <th className="py-2 px-4 text-gray-400">Gambar</th>
+                                        <th className="py-2 px-4 text-gray-400">ID</th>
+                                        <th className="py-2 px-4 text-gray-400">Kadaluarsa</th>
+                                        <th className="py-2 px-4 text-gray-400">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {banners.map(banner => (
+                                        <tr key={banner.id} className="border-b border-slate-700 last:border-b-0">
+                                            <td className="py-2 px-4"><img src={banner.image} className="h-16 w-32 object-cover rounded-lg" alt="banner" /></td>
+                                            <td className="py-2 px-4">{banner.id}</td>
+                                            <td className="py-2 px-4">{banner.expires}</td>
+                                            <td className="py-2 px-4">
+                                                <button className="text-sky-400 hover:underline mr-2" onClick={() => { setEditBannerId(banner.id); setIsModalOpen(true); }}>Edit</button>
+                                                <button className="text-red-500 hover:underline" onClick={() => handleDelete(banner.id)}>Hapus</button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {isModalOpen && (
+                        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-80 z-50">
+                            <div className="bg-slate-900 p-8 rounded-xl shadow-lg w-full max-w-lg border border-slate-700">
+                                <h2 className="text-2xl font-bold mb-4 text-sky-400 text-center">{editBannerId ? 'Edit Banner' : 'Tambah Banner'}</h2>
+                                <form onSubmit={handleModalSubmit}>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">URL Gambar</label>
+                                        <input type="text" value={bannerImage} onChange={(e) => setBannerImage(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    <div className="mb-4">
+                                        <label className="block text-sm font-medium text-gray-400">Tanggal Kadaluarsa</label>
+                                        <input type="date" value={bannerExpires} onChange={(e) => setBannerExpires(e.target.value)} className="input-style w-full p-3 rounded-lg mt-1 bg-slate-800 border border-slate-600 text-white" required />
+                                    </div>
+                                    <button type="submit" className="w-full bg-sky-400 text-black font-bold py-3 rounded-lg hover:bg-sky-200 transition-colors">{editBannerId ? 'Simpan Perubahan' : 'Tambah Banner'}</button>
+                                    <button type="button" className="w-full mt-2 bg-gray-700 text-white font-bold py-3 rounded-lg hover:bg-gray-600 transition-colors" onClick={() => setIsModalOpen(false)}>Batal</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </main>
+            </>
+        );
+    };
+
+    const renderAdminOrders = () => {
+        if (!loggedInUser?.is_admin) { return <div className="p-8 text-center text-red-500">Akses ditolak. Anda tidak memiliki izin.</div>; }
+        return (
+            <>
+                {renderHeader()}
+                <main className="container mx-auto px-4 py-8">
+                    <div className="flex justify-between items-center mb-6">
+                        <h1 className="text-3xl font-bold text-sky-400">Manajemen Pesanan</h1>
+                    </div>
+                    <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full text-left">
+                                <thead className="border-b border-slate-700">
+                                    <tr>
+                                        <th className="py-2 px-4 text-gray-400">Order ID</th>
+                                        <th className="py-2 px-4 text-gray-400">Tanggal</th>
+                                        <th className="py-2 px-4 text-gray-400">Game</th>
+                                        <th className="py-2 px-4 text-gray-400">User ID Game</th>
+                                        <th className="py-2 px-4 text-gray-400">Nominal</th>
+                                        <th className="py-2 px-4 text-gray-400">Total Harga</th>
+                                        <th className="py-2 px-4 text-gray-400">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {orders.map(order => (
+                                        <tr key={order.id} className="border-b border-slate-700 last:border-b-0">
+                                            <td className="py-2 px-4">{order.id}</td>
+                                            <td className="py-2 px-4">{new Date(order.timestamp).toLocaleDateString()}</td>
+                                            <td className="py-2 px-4">{order.gameName}</td>
+                                            <td className="py-2 px-4">{order.userIdGame}</td>
+                                            <td className="py-2 px-4">{order.nominalName}</td>
+                                            <td className="py-2 px-4">Rp {order.price?.toLocaleString('id-ID')}</td>
+                                            <td className="py-2 px-4 text-green-500 font-bold">{order.status}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </main>
+            </>
+        );
+    };
+
+    // Render the correct page based on state
+    const renderPage = () => {
+        if (isLoading) {
+            return <div className="flex justify-center items-center h-screen text-white">Loading...</div>;
+        }
+
+        switch (currentPage) {
+            case 'home':
+                return renderHomePage();
+            case 'topup':
+                return renderTopupPage();
+            case 'login':
+                return renderLoginPage();
+            case 'register':
+                return renderRegisterPage();
+            case 'admin-dashboard':
+                return renderAdminDashboard();
+            case 'admin-games':
+                return renderAdminGames();
+            case 'admin-products':
+                return renderAdminProducts();
+            case 'admin-banners':
+                return renderAdminBanners();
+            case 'admin-orders':
+                return renderAdminOrders();
+            case 'user-history':
+                // User history page logic not fully implemented yet, but we can return a placeholder or direct orders
+                return (
+                    <>
+                        {renderHeader()}
+                        <main className="container mx-auto px-4 py-8">
+                            <h1 className="text-3xl font-bold mb-6 text-center text-sky-400">Riwayat Top Up Anda</h1>
+                            <div className="bg-slate-900 p-6 rounded-xl shadow-lg border border-slate-700">
+                                <p className="text-center text-gray-400">Fitur ini akan menampilkan riwayat top up Anda.</p>
+                            </div>
+                        </main>
+                    </>
+                );
+            default:
+                return renderHomePage();
+        }
+    };
+
+    return (
+        <div className="bg-slate-800 min-h-screen">
+            {renderPage()}
+        </div>
+    );
+}
